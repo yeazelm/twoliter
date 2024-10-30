@@ -228,6 +228,9 @@ impl<L: ProjectLock> Project<L> {
     /// files.
     pub(crate) async fn find_go_modules(&self) -> Result<Vec<String>> {
         let root = self.project_dir.join("sources");
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
         let mut entries = WalkDir::new(&root);
         let mut modules = Vec::new();
         loop {
