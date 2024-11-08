@@ -27,7 +27,12 @@ impl CommandLine {
         ensure!(
             output.status.success(),
             error::OperationFailedSnafu {
-                message: String::from_utf8_lossy(&output.stderr),
+                message: format!(
+                    "status: {} stderr: {} stdout: {}",
+                    &output.status,
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&output.stdout)
+                ),
                 program: self.path.clone(),
                 args: args.iter().map(|x| x.to_string()).collect::<Vec<_>>()
             }

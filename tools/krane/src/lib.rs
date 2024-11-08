@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use flate2::read::GzDecoder;
-use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::fs::{File, Permissions};
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
-use pentacle::SealOptions;
+use tempfile::TempDir;
 
 const COMPRESSED_KRANE_BIN: &[u8] = include_bytes!(env!("KRANE_GZ_PATH"));
 
@@ -15,31 +15,30 @@ lazy_static::lazy_static! {
 #[derive(Debug)]
 pub struct Krane {
     // Hold the file in memory to keep the fd open
-    _sealed_binary: File,
+    _tmp_dir: TempDir,
     path: PathBuf,
 }
 
 impl Krane {
     fn seal() -> Result<Krane> {
+        let tmp_dir = TempDir::new()?;
+        let path = tmp_dir.path().join("krane");
+
+        let mut krane_file = File::create(&path)?;
+        let permissions = Permissions::from_mode(0o755);
+        krane_file.set_permissions(permissions)?;
+
         let mut krane_reader = GzDecoder::new(COMPRESSED_KRANE_BIN);
 
-        let sealed_binary = SealOptions::new()
-            .close_on_exec(false)
-            .executable(true)
-            .copy_and_seal(&mut krane_reader)
-            .context("Failed to write krane binary to sealed anonymous file")?;
-
-        let fd = sealed_binary.as_raw_fd();
-        let pid = std::process::id();
-        let path = PathBuf::from(format!("/proc/{pid}/fd/{fd}"));
+        std::io::copy(&mut krane_reader, &mut krane_file)?;
 
         Ok(Krane {
-            _sealed_binary: sealed_binary,
+            _tmp_dir: tmp_dir,
             path,
         })
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 }
