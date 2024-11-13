@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-[unreleased]: https://github.com/bottlerocket-os/twoliter/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/bottlerocket-os/twoliter/compare/v0.5.1...HEAD
+
+## [0.5.1] - 2024-11-11
+
+### Fixed
+
+- Allow projects to not have a `sources/` dir ([#404])
+- Write krane to a tempfile instead of a sealed anonymous file ([#405])
+
+[#404]: https://github.com/bottlerocket-os/twoliter/pull/404
+[#405]: https://github.com/bottlerocket-os/twoliter/pull/405
+
+[0.5.1]: https://github.com/bottlerocket-os/twoliter/compare/v0.5.0...v0.5.1
 
 ## [0.5.0] - 2024-10-10
 
