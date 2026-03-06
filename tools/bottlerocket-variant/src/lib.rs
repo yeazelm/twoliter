@@ -11,6 +11,7 @@ use std::borrow::Borrow;
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use std::path::Path;
 use std::str::FromStr;
 
 /// The name of the environment variable that tells us the current variant. Variant-sensitive crates
@@ -123,6 +124,25 @@ impl Variant {
         Variant::new(value)
     }
 
+    /// Create a new `Variant` from the `VARIANT` environment variable, applying any overrides
+    /// from the specified Cargo.toml manifest file.
+    ///
+    /// If the manifest file doesn't exist or has no `[package.metadata.bottlerocket-variant]`
+    /// section, no overrides are applied. Malformed TOML will return an error.
+    pub fn from_env_with_manifest<P: AsRef<Path>>(manifest_path: P) -> Result<Self> {
+        let variant = Self::from_env()?;
+        let path = manifest_path.as_ref();
+        if !path.exists() {
+            return Ok(variant);
+        }
+        let content = std::fs::read_to_string(path).map_err(|e| error::Error::VariantPart {
+            part_name: "Cargo.toml".to_string(),
+            variant: format!("read error: {e}"),
+        })?;
+        let overrides = VariantOverrides::from_cargo_toml(&content)?;
+        Ok(variant.with_overrides(&overrides))
+    }
+
     /// The variant's platform. This is the first member of the tuple. For example, in `vmware-dev`,
     /// `vmware` is the platform.
     pub fn platform(&self) -> &str {
@@ -189,6 +209,42 @@ impl Variant {
             "cargo:rustc-cfg=variant_flavor=\"{}\"",
             self.variant_flavor().unwrap_or(DEFAULT_VARIANT_FLAVOR)
         );
+    }
+
+    /// Apply overrides to create a new Variant with the specified attributes replaced.
+    ///
+    /// If an override is `Some`, it replaces the original value. If `None`, the original is kept.
+    /// Family is recomputed from final platform/runtime UNLESS family was explicitly overridden.
+    pub fn with_overrides(&self, overrides: &VariantOverrides) -> Self {
+        let platform = overrides
+            .platform
+            .clone()
+            .unwrap_or_else(|| self.platform.clone());
+        let runtime = overrides
+            .runtime
+            .clone()
+            .unwrap_or_else(|| self.runtime.clone());
+        let family = overrides
+            .family
+            .clone()
+            .unwrap_or_else(|| format!("{platform}-{runtime}"));
+        let version = overrides.version.clone().or_else(|| self.version.clone());
+        let variant_flavor = overrides
+            .flavor
+            .clone()
+            .or_else(|| self.variant_flavor.clone());
+
+        // Preserve the original variant name - it's the identity, not derived from attributes
+        let variant = self.variant.clone();
+
+        Self {
+            variant,
+            platform,
+            runtime,
+            family,
+            version,
+            variant_flavor,
+        }
     }
 
     fn parse<S: Into<String>>(value: S) -> Result<Self> {
@@ -438,5 +494,295 @@ fn parse_err() {
             "Expected Variant::new(\"{}\") to return an error",
             test
         );
+    }
+}
+
+/// Overrides for variant attributes that can be specified in a package's Cargo.toml.
+///
+/// These overrides are read from `[package.metadata.bottlerocket-variant]` and allow
+/// packages to override the variant attributes derived from the variant string.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct VariantOverrides {
+    pub platform: Option<String>,
+    pub runtime: Option<String>,
+    pub family: Option<String>,
+    pub version: Option<String>,
+    pub flavor: Option<String>,
+}
+
+impl VariantOverrides {
+    /// Parse variant overrides from Cargo.toml content.
+    ///
+    /// Looks for `[package.metadata.bottlerocket-variant]` section.
+    pub fn from_cargo_toml(content: &str) -> Result<Self> {
+        let table: toml::Table = content.parse().map_err(|e| error::Error::VariantPart {
+            part_name: "Cargo.toml".to_string(),
+            variant: format!("parse error: {e}"),
+        })?;
+
+        let overrides = table
+            .get("package")
+            .and_then(|p| p.get("metadata"))
+            .and_then(|m| m.get("bottlerocket-variant"))
+            .map(|v| {
+                VariantOverrides::deserialize(v.clone()).map_err(|e| error::Error::VariantPart {
+                    part_name: "bottlerocket-variant".to_string(),
+                    variant: format!("deserialize error: {e}"),
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        Ok(overrides)
+    }
+
+    /// Returns true if no overrides are set.
+    pub fn is_empty(&self) -> bool {
+        self.platform.is_none()
+            && self.runtime.is_none()
+            && self.family.is_none()
+            && self.version.is_none()
+            && self.flavor.is_none()
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn parse_overrides_all_fields() {
+        let toml = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[package.metadata.bottlerocket-variant]
+platform = "custom-platform"
+runtime = "custom-runtime"
+family = "custom-family"
+version = "custom-version"
+flavor = "custom-flavor"
+"#;
+        let overrides = VariantOverrides::from_cargo_toml(toml).unwrap();
+        assert_eq!(overrides.platform, Some("custom-platform".to_string()));
+        assert_eq!(overrides.runtime, Some("custom-runtime".to_string()));
+        assert_eq!(overrides.family, Some("custom-family".to_string()));
+        assert_eq!(overrides.version, Some("custom-version".to_string()));
+        assert_eq!(overrides.flavor, Some("custom-flavor".to_string()));
+        assert!(!overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_overrides_partial() {
+        let toml = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[package.metadata.bottlerocket-variant]
+platform = "metal"
+"#;
+        let overrides = VariantOverrides::from_cargo_toml(toml).unwrap();
+        assert_eq!(overrides.platform, Some("metal".to_string()));
+        assert_eq!(overrides.runtime, None);
+        assert!(!overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_overrides_missing_section() {
+        let toml = r#"
+[package]
+name = "test"
+version = "0.1.0"
+"#;
+        let overrides = VariantOverrides::from_cargo_toml(toml).unwrap();
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_overrides_empty_section() {
+        let toml = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[package.metadata.bottlerocket-variant]
+"#;
+        let overrides = VariantOverrides::from_cargo_toml(toml).unwrap();
+        assert!(overrides.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod with_overrides_tests {
+    use super::*;
+
+    #[test]
+    fn test_with_overrides_platform_only() {
+        let variant = Variant::new("aws-k8s-1.32").unwrap();
+        let overrides = VariantOverrides {
+            platform: Some("metal".to_string()),
+            ..Default::default()
+        };
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.platform(), "metal");
+        assert_eq!(result.runtime(), "k8s");
+        assert_eq!(result.family(), "metal-k8s");
+        assert_eq!(result.version(), Some("1.32"));
+    }
+
+    #[test]
+    fn test_with_overrides_runtime_only() {
+        let variant = Variant::new("aws-k8s-1.32").unwrap();
+        let overrides = VariantOverrides {
+            runtime: Some("ecs".to_string()),
+            ..Default::default()
+        };
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.platform(), "aws");
+        assert_eq!(result.runtime(), "ecs");
+        assert_eq!(result.family(), "aws-ecs");
+        assert_eq!(result.version(), Some("1.32"));
+    }
+
+    #[test]
+    fn test_with_overrides_family_explicit() {
+        let variant = Variant::new("aws-k8s-1.32").unwrap();
+        let overrides = VariantOverrides {
+            platform: Some("metal".to_string()),
+            family: Some("custom-family".to_string()),
+            ..Default::default()
+        };
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.platform(), "metal");
+        assert_eq!(result.runtime(), "k8s");
+        assert_eq!(result.family(), "custom-family");
+    }
+
+    #[test]
+    fn test_with_overrides_family_computed() {
+        let variant = Variant::new("aws-k8s-1.32").unwrap();
+        let overrides = VariantOverrides {
+            platform: Some("vmware".to_string()),
+            runtime: Some("dev".to_string()),
+            ..Default::default()
+        };
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.family(), "vmware-dev");
+    }
+
+    #[test]
+    fn test_with_overrides_all_fields() {
+        let variant = Variant::new("aws-k8s-1.32").unwrap();
+        let overrides = VariantOverrides {
+            platform: Some("metal".to_string()),
+            runtime: Some("dev".to_string()),
+            family: Some("custom".to_string()),
+            version: Some("2.0".to_string()),
+            flavor: Some("nvidia".to_string()),
+        };
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.platform(), "metal");
+        assert_eq!(result.runtime(), "dev");
+        assert_eq!(result.family(), "custom");
+        assert_eq!(result.version(), Some("2.0"));
+        assert_eq!(result.variant_flavor(), Some("nvidia"));
+    }
+
+    #[test]
+    fn test_with_overrides_none() {
+        let variant = Variant::new("aws-k8s-1.32-nvidia").unwrap();
+        let overrides = VariantOverrides::default();
+        let result = variant.with_overrides(&overrides);
+        assert_eq!(result.platform(), "aws");
+        assert_eq!(result.runtime(), "k8s");
+        assert_eq!(result.family(), "aws-k8s");
+        assert_eq!(result.version(), Some("1.32"));
+        assert_eq!(result.variant_flavor(), Some("nvidia"));
+    }
+
+    #[test]
+    fn test_existing_parsing_unchanged() {
+        // Ensure original parsing still works correctly
+        let variant = Variant::new("aws-k8s-1.32-nvidia").unwrap();
+        assert_eq!(variant.platform(), "aws");
+        assert_eq!(variant.runtime(), "k8s");
+        assert_eq!(variant.family(), "aws-k8s");
+        assert_eq!(variant.version(), Some("1.32"));
+        assert_eq!(variant.variant_flavor(), Some("nvidia"));
+
+        let variant2 = Variant::new("metal-dev").unwrap();
+        assert_eq!(variant2.platform(), "metal");
+        assert_eq!(variant2.runtime(), "dev");
+        assert_eq!(variant2.family(), "metal-dev");
+        assert_eq!(variant2.version(), None);
+        assert_eq!(variant2.variant_flavor(), None);
+    }
+}
+
+#[cfg(test)]
+mod from_env_with_manifest_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_from_env_with_manifest_with_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("Cargo.toml");
+        let mut f = std::fs::File::create(&manifest).unwrap();
+        writeln!(
+            f,
+            r#"[package]
+name = "test"
+version = "0.1.0"
+
+[package.metadata.bottlerocket-variant]
+platform = "metal"
+"#
+        )
+        .unwrap();
+
+        std::env::set_var(VARIANT_ENV, "aws-k8s-1.32");
+        let variant = Variant::from_env_with_manifest(&manifest).unwrap();
+        assert_eq!(variant.platform(), "metal");
+        assert_eq!(variant.runtime(), "k8s");
+        assert_eq!(variant.family(), "metal-k8s");
+    }
+
+    #[test]
+    fn test_from_env_with_manifest_no_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("Cargo.toml");
+        let mut f = std::fs::File::create(&manifest).unwrap();
+        writeln!(
+            f,
+            r#"[package]
+name = "test"
+version = "0.1.0"
+"#
+        )
+        .unwrap();
+
+        std::env::set_var(VARIANT_ENV, "aws-k8s-1.32");
+        let variant = Variant::from_env_with_manifest(&manifest).unwrap();
+        assert_eq!(variant.platform(), "aws");
+        assert_eq!(variant.runtime(), "k8s");
+    }
+
+    #[test]
+    fn test_from_env_with_manifest_missing_file() {
+        std::env::set_var(VARIANT_ENV, "aws-k8s-1.32");
+        let variant = Variant::from_env_with_manifest("/nonexistent/Cargo.toml").unwrap();
+        assert_eq!(variant.platform(), "aws");
+        assert_eq!(variant.runtime(), "k8s");
+    }
+
+    #[test]
+    fn test_from_env_unchanged() {
+        std::env::set_var(VARIANT_ENV, "vmware-dev");
+        let variant = Variant::from_env().unwrap();
+        assert_eq!(variant.platform(), "vmware");
+        assert_eq!(variant.runtime(), "dev");
     }
 }

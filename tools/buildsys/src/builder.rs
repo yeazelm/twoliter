@@ -7,7 +7,7 @@ the repository's top-level Dockerfile.
 pub(crate) mod error;
 
 use crate::args::{BuildKitArgs, BuildPackageArgs, BuildVariantArgs, RepackVariantArgs};
-use bottlerocket_variant::Variant;
+use bottlerocket_variant::{Variant, VariantOverrides};
 use buildsys::manifest::{
     ExternalKitMetadataView, ImageFeature, ImageFormat, ImageLayout, Manifest, PartitionPlan,
     SupportedArch,
@@ -224,6 +224,7 @@ struct VariantBuildArgs {
     partition_plan: String,
     pretty_name: String,
     variant: String,
+    variant_name: String,
     variant_family: String,
     variant_flavor: String,
     variant_platform: String,
@@ -257,6 +258,7 @@ impl VariantBuildArgs {
         args.build_arg("PARTITION_PLAN", &self.partition_plan);
         args.build_arg("PRETTY_NAME", &self.pretty_name);
         args.build_arg("VARIANT", &self.variant);
+        args.build_arg("VARIANT_NAME", &self.variant_name);
         args.build_arg("VARIANT_FAMILY", &self.variant_family);
         args.build_arg("VARIANT_FLAVOR", &self.variant_flavor);
         args.build_arg("VARIANT_PLATFORM", &self.variant_platform);
@@ -442,9 +444,16 @@ impl DockerBuild {
         let (os_image_publish_size_gib, data_image_publish_size_gib) =
             image_layout.publish_image_sizes_gib();
 
+        let cargo_toml_path = args.common.cargo_manifest_dir.join("Cargo.toml");
         let variant = filename(args.common.cargo_manifest_dir);
 
         let v = Variant::new(&variant).context(error::VariantParseSnafu)?;
+        let cargo_toml_content = std::fs::read_to_string(&cargo_toml_path).unwrap_or_default();
+        let overrides = VariantOverrides::from_cargo_toml(&cargo_toml_content)
+            .context(error::VariantParseSnafu)?;
+        let v = v.with_overrides(&overrides);
+        let variant_name = variant.clone();
+        let variant: String = v.as_ref().into();
         let variant_platform = v.platform().into();
         let variant_runtime = v.runtime().into();
         let variant_family = v.family().into();
@@ -457,15 +466,18 @@ impl DockerBuild {
             context: args.common.root_dir.clone(),
             target: "variant".to_string(),
             tag: append_token(
-                format!("buildsys-var-{variant}-{arch}", arch = args.common.arch),
+                format!(
+                    "buildsys-var-{variant_name}-{arch}",
+                    arch = args.common.arch
+                ),
                 &args.common.root_dir,
             ),
             root_dir: args.common.root_dir.clone(),
             artifacts_dirs: vec![args
                 .image_dir
-                .join(format!("{}-{}", args.common.arch, variant))],
+                .join(format!("{}-{}", args.common.arch, variant_name))],
             state_dir: args.common.state_dir,
-            artifact_name: variant.clone(),
+            artifact_name: variant_name.clone(),
             common_build_args: CommonBuildArgs::new(
                 &args.common.root_dir,
                 args.common.sdk_image,
@@ -508,6 +520,7 @@ impl DockerBuild {
                 .to_string(),
                 pretty_name: args.pretty_name,
                 variant,
+                variant_name,
                 variant_family,
                 variant_flavor,
                 variant_platform,
@@ -532,8 +545,13 @@ impl DockerBuild {
         let (os_image_publish_size_gib, data_image_publish_size_gib) =
             image_layout.publish_image_sizes_gib();
 
+        let cargo_toml_path = args.common.cargo_manifest_dir.join("Cargo.toml");
         let variant = filename(args.common.cargo_manifest_dir);
         let v = Variant::new(&variant).context(error::VariantParseSnafu)?;
+        let cargo_toml_content = std::fs::read_to_string(&cargo_toml_path).unwrap_or_default();
+        let overrides = VariantOverrides::from_cargo_toml(&cargo_toml_content)
+            .context(error::VariantParseSnafu)?;
+        let v = v.with_overrides(&overrides);
         let variant_platform = v.platform().into();
 
         Ok(Self {
