@@ -214,8 +214,16 @@ impl Variant {
             .clone()
             .or_else(|| self.variant_flavor.clone());
 
-        // Preserve the original variant name - it's the identity, not derived from attributes
-        let variant = self.variant.clone();
+        // Reconstruct variant string from final attributes: platform-runtime[-version][-flavor]
+        let mut variant = format!("{platform}-{runtime}");
+        if let Some(ref v) = version {
+            variant.push('-');
+            variant.push_str(v);
+        }
+        if let Some(ref f) = variant_flavor {
+            variant.push('-');
+            variant.push_str(f);
+        }
 
         Self {
             variant,
@@ -227,20 +235,35 @@ impl Variant {
         }
     }
 
-    /// Override the platform attribute. If `Some`, updates the platform and recomputes family.
+    /// Reconstruct the variant string from current attributes.
+    fn rebuild_variant(&mut self) {
+        self.variant = format!("{}-{}", self.platform, self.runtime);
+        if let Some(ref v) = self.version {
+            self.variant.push('-');
+            self.variant.push_str(v);
+        }
+        if let Some(ref f) = self.variant_flavor {
+            self.variant.push('-');
+            self.variant.push_str(f);
+        }
+    }
+
+    /// Override the platform attribute. If `Some`, updates the platform and recomputes family and variant.
     pub fn with_platform_override(mut self, platform: Option<String>) -> Self {
         if let Some(p) = platform {
             self.platform = p;
             self.family = format!("{}-{}", self.platform, self.runtime);
+            self.rebuild_variant();
         }
         self
     }
 
-    /// Override the runtime attribute. If `Some`, updates the runtime and recomputes family.
+    /// Override the runtime attribute. If `Some`, updates the runtime and recomputes family and variant.
     pub fn with_runtime_override(mut self, runtime: Option<String>) -> Self {
         if let Some(r) = runtime {
             self.runtime = r;
             self.family = format!("{}-{}", self.platform, self.runtime);
+            self.rebuild_variant();
         }
         self
     }
@@ -253,10 +276,11 @@ impl Variant {
         self
     }
 
-    /// Override the variant flavor attribute. If `Some`, updates the variant_flavor.
+    /// Override the variant flavor attribute. If `Some`, updates the variant_flavor and rebuilds variant.
     pub fn with_flavor_override(mut self, flavor: Option<String>) -> Self {
         if let Some(f) = flavor {
             self.variant_flavor = Some(f);
+            self.rebuild_variant();
         }
         self
     }
