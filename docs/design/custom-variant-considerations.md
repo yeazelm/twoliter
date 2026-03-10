@@ -5,8 +5,8 @@
 Bottlerocket variants can override attributes like `platform` and `runtime` to inherit build-time behavior from standard variant families. For example, a custom variant named `foo-k8s-1.35` might override:
 
 ```toml
-[variant]
-platform = "aws"
+[package.metadata.build-variant]
+platform = "vmware"
 runtime = "k8s"
 ```
 
@@ -81,8 +81,8 @@ Add your variant to `packages/settings-defaults/settings-defaults.spec`. You can
 ```spec
 %package foo-k8s-1.35
 Summary: Settings defaults for foo-k8s-1.35 variant
+Requires: %{_cross_os}variant(foo-k8s-1.35)
 Provides: %{_cross_os}settings-defaults(any)
-Requires: variant(foo-k8s-1.35)
 
 %description foo-k8s-1.35
 %{summary}.
@@ -96,26 +96,10 @@ Requires: variant(foo-k8s-1.35)
 ```spec
 %package aws-k8s-1.35
 ...
-Requires: variant(aws-k8s-1.35)
-Requires: variant(aws-k8s-1.35-fips)
-Requires: variant(foo-k8s-1.35)  # Add your variant here
+Requires: (%{shrink:
+           %{_cross_os}variant(aws-k8s-1.35)      or
+           %{_cross_os}variant(aws-k8s-1.35-fips) or
+           %{_cross_os}variant(foo-k8s-1.35) # Add your variant here
+           %{nil}})
+
 ```
-
-## Additional Considerations
-
-### FIPS Variants
-
-FIPS variants typically share settings-defaults with their non-FIPS counterparts. If you create `foo-k8s-1.35-fips`, you can add it to the same subpackage as `foo-k8s-1.35`.
-
-### Nvidia Variants
-
-Nvidia variants require separate settings-defaults directories because they need:
-- Different containerd configuration (`kubernetes-containerd-nvidia.toml`)
-- Nvidia-specific settings (`nvidia-k8s-*.toml`)
-- Different lockdown settings (`lockdown-none.toml` instead of `lockdown-integrity.toml`)
-
-### Variant Grouping in Spec
-
-When grouping multiple variants in a single spec subpackage, all grouped variants must have compatible settings requirements. The standard pattern groups:
-- Multiple Kubernetes versions (e.g., 1.29, 1.30, 1.31)
-- FIPS and non-FIPS variants of the same version

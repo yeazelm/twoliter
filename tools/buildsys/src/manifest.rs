@@ -573,6 +573,39 @@ impl ManifestInfo {
             .as_ref()
             .and_then(|m| m.build_variant.as_ref())
     }
+
+    /// Returns variant attribute overrides from `[package.metadata.build-variant]`.
+    pub fn variant_overrides(&self) -> bottlerocket_variant::VariantOverrides {
+        self.build_variant()
+            .map(|bv| bottlerocket_variant::VariantOverrides {
+                platform: bv.platform.clone(),
+                runtime: bv.runtime.clone(),
+                family: bv.family.clone(),
+                version: bv.version.clone(),
+                flavor: bv.flavor.clone(),
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns the variant platform override from `[package.metadata.build-variant]`.
+    pub fn variant_platform(&self) -> Option<String> {
+        self.build_variant().and_then(|bv| bv.platform.clone())
+    }
+
+    /// Returns the variant runtime override from `[package.metadata.build-variant]`.
+    pub fn variant_runtime(&self) -> Option<String> {
+        self.build_variant().and_then(|bv| bv.runtime.clone())
+    }
+
+    /// Returns the variant family override from `[package.metadata.build-variant]`.
+    pub fn variant_family(&self) -> Option<String> {
+        self.build_variant().and_then(|bv| bv.family.clone())
+    }
+
+    /// Returns the variant flavor override from `[package.metadata.build-variant]`.
+    pub fn variant_flavor(&self) -> Option<String> {
+        self.build_variant().and_then(|bv| bv.flavor.clone())
+    }
 }
 
 /// For the "top-level manifest", i.e. the thing that `buildsys` is building, only
@@ -697,7 +730,14 @@ pub struct BuildVariant {
     pub supported_arches: Option<HashSet<SupportedArch>>,
     pub kernel_parameters: Option<Vec<String>>,
     pub image_features: Option<HashMap<ImageFeature, bool>>,
+    // Variant attribute overrides
+    pub platform: Option<String>,
+    pub runtime: Option<String>,
+    pub family: Option<String>,
+    pub version: Option<String>,
+    pub flavor: Option<String>,
 }
+
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]

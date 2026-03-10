@@ -11,8 +11,4 @@ exclude = ["README.md"]
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 snafu.workspace = true
-toml.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
