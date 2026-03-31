@@ -1,0 +1,211 @@
+/*!
+Packages using the Rust programming language may have upstream tar archives that
+include only the source code of the project, but not the source code of any
+dependencies. Rust projects use Cargo for dependency management, with dependencies
+declared in `Cargo.toml` and locked versions in `Cargo.lock`.
+
+This module extends the functionality of `packages.metadata.build-package.external-files`
+and provides the ability to retrieve and vendor dependencies using `cargo vendor`
+given a tar archive containing a `Cargo.toml` and `Cargo.lock`.
+
+The vendored output includes both the `vendor/` directory and `.cargo/config.toml`
+which configures Cargo to use the vendored dependencies.
+
+ */
+
+pub(crate) mod error;
+
+use buildsys::manifest;
+use duct::cmd;
+use error::Result;
+use filetime::{set_file_mtime, FileTime};
+use snafu::{ensure, OptionExt, ResultExt};
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::{env, fs};
+
+pub(crate) struct RustMod;
+
+const RUST_MOD_DOCKER_SCRIPT_NAME: &str = "docker-cargo-script.sh";
+
+// The following bash template script is intended to be run within a container
+// using the docker-cargo tool found in this codebase under `tools/docker-cargo`.
+//
+// This script inspects the top level directory found in the package upstream
+// archive and uses that as the default module path if no explicit module
+// path was provided. It will then untar the archive, vendor the Rust
+// dependencies using `cargo vendor`, create a new archive containing both
+// the vendor/ directory and .cargo/config.toml, and name it the output path
+// provided. If no output path was given, it defaults to "bundled-{package-file-name}".
+// Finally, it cleans up by removing the untar'd source code. The upstream archive
+// remains intact and both tar files can then be used during packaging.
+//
+// Critical difference from Go: Rust bundles BOTH vendor/ AND .cargo/config.toml
+const RUST_MOD_SCRIPT_TMPL: &str = r#"#!/bin/bash
+
+set -e
+
+toplevel=$(tar tf __LOCAL_FILE_NAME__ | head -1)
+if [ -z __MOD_DIR__ ] ; then
+    targetdir="${toplevel}"
+else
+    targetdir="__MOD_DIR__"
+fi
+
+tar xf __LOCAL_FILE_NAME__
+
+pushd "${targetdir}"
+    mkdir -p .cargo
+    cargo vendor --locked > .cargo/config.toml
+popd
+
+pushd "${targetdir}"
+    tar czf ../__OUTPUT__ vendor .cargo/config.toml
+popd
+rm -rf "${targetdir}"
+touch -r __LOCAL_FILE_NAME__ __OUTPUT__
+"#;
+
+impl RustMod {
+    pub(crate) fn vendor(
+        root_dir: &Path,
+        package_dir: &Path,
+        external_file: &manifest::ExternalFile,
+        sdk: &str,
+        mtime: FileTime,
+    ) -> Result<()> {
+        let url_file_name = extract_file_name(&external_file.url)?;
+        let local_file_name = &external_file.path.as_ref().unwrap_or(&url_file_name);
+        ensure!(
+            local_file_name.components().count() == 1,
+            error::InputFileSnafu
+        );
+
+        let full_path = package_dir.join(local_file_name);
+        ensure!(
+            full_path.is_file(),
+            error::InputFileBadSnafu { path: full_path }
+        );
+
+        // If a module directory was not provided, set as an empty path.
+        // By default, without a provided module directory, tar will be passed
+        // the first directory found in the archives as the top level module
+        let default_empty_path = PathBuf::from("");
+        let mod_dir = external_file
+            .bundle_root_path
+            .as_ref()
+            .unwrap_or(&default_empty_path);
+
+        // Use a default "bundle-{name-of-file}" if no output path was provided
+        let default_output_path =
+            PathBuf::from(format!("bundled-{}", local_file_name.to_string_lossy()));
+        let output_path_arg = external_file
+            .bundle_output_path
+            .as_ref()
+            .unwrap_or(&default_output_path);
+        println!(
+            "cargo:rerun-if-changed={}",
+            output_path_arg.to_string_lossy()
+        );
+
+        let args = DockerCargoArgs {
+            module_path: package_dir,
+            sdk_image: sdk.to_string(),
+            cargo_home: &root_dir.join(".cargo"),
+            command: format!("./{RUST_MOD_DOCKER_SCRIPT_NAME}"),
+        };
+
+        // Create and/or write the temporary script file to the package directory
+        // using the script template string and placeholder variables
+        let script_contents = RUST_MOD_SCRIPT_TMPL
+            .replace("__LOCAL_FILE_NAME__", &local_file_name.to_string_lossy())
+            .replace("__MOD_DIR__", &mod_dir.to_string_lossy())
+            .replace("__OUTPUT__", &output_path_arg.to_string_lossy());
+        let script_path = format!(
+            "{}/{}",
+            package_dir.to_string_lossy(),
+            RUST_MOD_DOCKER_SCRIPT_NAME
+        );
+
+        // Drop the reference after writing the file to avoid a "text busy" error
+        // when attempting to execute it.
+        {
+            let mut script_file = fs::File::create(&script_path)
+                .context(error::CreateFileSnafu { path: &script_path })?;
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o777))
+                .context(error::SetFilePermissionsSnafu { path: &script_path })?;
+            script_file
+                .write_all(script_contents.as_bytes())
+                .context(error::WriteFileSnafu { path: &script_path })?;
+        }
+
+        let res = docker_cargo(&args);
+        fs::remove_file(&script_path).context(error::RemoveFileSnafu { path: &script_path })?;
+
+        if res.is_ok() {
+            set_file_mtime(output_path_arg, mtime).context(error::SetMtimeSnafu {
+                path: output_path_arg,
+            })?;
+        }
+
+        res
+    }
+}
+
+fn extract_file_name(url: &str) -> Result<PathBuf> {
+    let parsed = reqwest::Url::parse(url).context(error::InputUrlSnafu { url })?;
+    let name = parsed
+        .path_segments()
+        .context(error::InputFileBadSnafu { path: url })?
+        .next_back()
+        .context(error::InputFileBadSnafu { path: url })?;
+    Ok(name.into())
+}
+
+struct DockerCargoArgs<'a> {
+    module_path: &'a Path,
+    sdk_image: String,
+    cargo_home: &'a Path,
+    command: String,
+}
+
+/// Run `docker-cargo` with the specified arguments.
+fn docker_cargo(dc_args: &DockerCargoArgs) -> Result<()> {
+    let args = vec![
+        "--module-path",
+        dc_args
+            .module_path
+            .to_str()
+            .context(error::InputFileSnafu)?,
+        "--sdk-image",
+        &dc_args.sdk_image,
+        "--cargo-home",
+        dc_args
+            .cargo_home
+            .to_str()
+            .context(error::InputFileSnafu)?,
+        "--command",
+        &dc_args.command,
+    ];
+    let arg_string = args.join(" ");
+    let twoliter_tools_dir = env::var("TWOLITER_TOOLS_DIR").context(error::EnvironmentSnafu {
+        var: "TWOLITER_TOOLS_DIR",
+    })?;
+    let program = PathBuf::from(twoliter_tools_dir).join("docker-cargo");
+    println!("program: {}", program.to_string_lossy());
+    let output = cmd(program, args)
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .context(error::CommandStartSnafu)?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("{}", &stdout);
+    ensure!(
+        output.status.success(),
+        error::DockerExecutionSnafu { args: arg_string }
+    );
+    Ok(())
+}

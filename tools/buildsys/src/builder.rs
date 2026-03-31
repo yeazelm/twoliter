@@ -19,7 +19,6 @@ use error::Result;
 use lazy_static::lazy_static;
 use nonzero_ext::nonzero;
 use pipesys::server::Server as PipesysServer;
-use rand::Rng;
 use regex::Regex;
 use semver::{Comparator, Op, Prerelease, Version, VersionReq};
 use sha2::{Digest, Sha512};
@@ -141,7 +140,11 @@ impl CommonBuildArgs {
         let token = token(&root);
 
         // Avoid using a cached layer from a previous build.
-        let nocache = rand::rng().random::<u128>().to_string();
+        let nocache = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .to_string();
 
         // Generate a unique address for the socket that sends the output directory file
         // descriptor.
